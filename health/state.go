@@ -5,6 +5,8 @@ package health
 
 import (
 	"time"
+
+	"tailscale.com/tailcfg"
 )
 
 // State contains the health status of the backend, and is
@@ -27,10 +29,16 @@ type UnhealthyState struct {
 	Severity            Severity
 	Title               string
 	Text                string
-	BrokenSince         *time.Time     `json:",omitempty"`
-	Args                Args           `json:",omitempty"`
-	DependsOn           []WarnableCode `json:",omitempty"`
-	ImpactsConnectivity bool           `json:",omitempty"`
+	BrokenSince         *time.Time           `json:",omitempty"`
+	Args                Args                 `json:",omitempty"`
+	DependsOn           []WarnableCode       `json:",omitempty"`
+	ImpactsConnectivity bool                 `json:",omitempty"`
+	PrimaryAction       UnhealthyStateAction `json:",omitempty"`
+}
+
+type UnhealthyStateAction struct {
+	URL   string
+	Label string
 }
 
 // unhealthyState returns a unhealthyState of the Warnable given its current warningState.
@@ -98,8 +106,45 @@ func (t *Tracker) CurrentState() *State {
 		wm[w.Code] = *w.unhealthyState(ws)
 	}
 
+	for _, m := range t.controlMessages {
+		s := UnhealthyStateFromDisplayMessage(m)
+		wm[s.WarnableCode] = s
+	}
+
 	return &State{
 		Warnings: wm,
+	}
+}
+
+func UnhealthyStateFromDisplayMessage(message tailcfg.DisplayMessage) UnhealthyState {
+	state := UnhealthyState{
+		WarnableCode:        WarnableCode(message.ID), // todo maybe prefix?
+		Severity:            SeverityFromDisplayMessageSeverity(message.Severity),
+		Title:               message.Title,
+		Text:                message.Text,
+		ImpactsConnectivity: message.ImpactsConnectivity,
+	}
+
+	if message.PrimaryAction != nil {
+		state.PrimaryAction = UnhealthyStateAction{
+			URL:   message.PrimaryAction.URL,
+			Label: message.PrimaryAction.Label,
+		}
+	}
+
+	return state
+}
+
+func SeverityFromDisplayMessageSeverity(s tailcfg.DisplayMessageSeverity) Severity {
+	switch s {
+	case tailcfg.SeverityHigh:
+		return SeverityHigh
+	case tailcfg.SeverityMedium:
+		return SeverityMedium
+	case tailcfg.SeverityLow:
+		return SeverityLow
+	default:
+		return SeverityLow // todo: ?
 	}
 }
 

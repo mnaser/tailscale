@@ -7,6 +7,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"fmt"
 	"maps"
 	"net"
 	"reflect"
@@ -86,6 +87,7 @@ type mapSession struct {
 	lastDomain             string
 	lastDomainAuditLogID   string
 	lastHealth             []string
+	lastDisplayMessages    []tailcfg.DisplayMessage
 	lastPopBrowserURL      string
 	lastTKAInfo            *tailcfg.TKAInfo
 	lastNetmapSummary      string // from NetworkMap.VeryConcise
@@ -382,6 +384,9 @@ func (ms *mapSession) updateStateFromResponse(resp *tailcfg.MapResponse) {
 	}
 	if resp.Health != nil {
 		ms.lastHealth = resp.Health
+	}
+	if resp.DisplayMessages != nil {
+		ms.lastDisplayMessages = resp.DisplayMessages
 	}
 	if resp.TKAInfo != nil {
 		ms.lastTKAInfo = resp.TKAInfo
@@ -802,6 +807,21 @@ func (ms *mapSession) sortedPeers() []tailcfg.NodeView {
 func (ms *mapSession) netmap() *netmap.NetworkMap {
 	peerViews := ms.sortedPeers()
 
+	var displayMessages []tailcfg.DisplayMessage
+	if len(ms.lastDisplayMessages) != 0 {
+		displayMessages = ms.lastDisplayMessages
+	} else if len(ms.lastHealth) != 0 {
+		for _, h := range ms.lastHealth {
+			m := tailcfg.DisplayMessage{
+				ID:       "control-health",
+				Title:    "Coordination server reports an issue",
+				Severity: tailcfg.SeverityMedium,
+				Text:     fmt.Sprintf("The coordination server is reporting an health issue: %s", h),
+			}
+			displayMessages = append(displayMessages, m)
+		}
+	}
+
 	nm := &netmap.NetworkMap{
 		NodeKey:           ms.publicNodeKey,
 		PrivateKey:        ms.privateNodeKey,
@@ -816,7 +836,7 @@ func (ms *mapSession) netmap() *netmap.NetworkMap {
 		SSHPolicy:         ms.lastSSHPolicy,
 		CollectServices:   ms.collectServices,
 		DERPMap:           ms.lastDERPMap,
-		ControlHealth:     ms.lastHealth,
+		DisplayMessages:   displayMessages,
 		TKAEnabled:        ms.lastTKAInfo != nil && !ms.lastTKAInfo.Disabled,
 	}
 

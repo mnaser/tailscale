@@ -111,7 +111,7 @@ type Tracker struct {
 	ipnWantRunning          bool
 	ipnWantRunningLastTrue  time.Time // when ipnWantRunning last changed false -> true
 	anyInterfaceUp          opt.Bool  // empty means unknown (assume true)
-	controlHealth           []string
+	controlMessages         []tailcfg.DisplayMessage
 	lastLoginErr            error
 	localLogConfigErr       error
 	tlsConnectionErrors     map[string]error // map[ServerName]error
@@ -453,6 +453,12 @@ func (t *Tracker) setHealthyLocked(w *Warnable) {
 	}
 }
 
+func (t *Tracker) notifyWatchersLocked() {
+	for _, cb := range t.watchers {
+		go cb(nil, nil)
+	}
+}
+
 // AppendWarnableDebugFlags appends to base any health items that are currently in failed
 // state and were created with MapDebugFlag.
 func (t *Tracker) AppendWarnableDebugFlags(base []string) []string {
@@ -637,14 +643,15 @@ func (t *Tracker) updateLegacyErrorWarnableLocked(key Subsystem, err error) {
 	}
 }
 
-func (t *Tracker) SetControlHealth(problems []string) {
+func (t *Tracker) SetControlHealth(problems []tailcfg.DisplayMessage) {
 	if t.nil() {
 		return
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.controlHealth = problems
+	t.controlMessages = problems
 	t.selfCheckLocked()
+	t.notifyWatchersLocked()
 }
 
 // GotStreamedMapResponse notes that we got a tailcfg.MapResponse
@@ -1147,16 +1154,6 @@ func (t *Tracker) updateBuiltinWarnablesLocked() {
 		}
 	} else {
 		t.setHealthyLocked(derpRegionErrorWarnable)
-	}
-
-	if len(t.controlHealth) > 0 {
-		for _, s := range t.controlHealth {
-			t.setUnhealthyLocked(controlHealthWarnable, Args{
-				ArgError: s,
-			})
-		}
-	} else {
-		t.setHealthyLocked(controlHealthWarnable)
 	}
 
 	if err := envknob.ApplyDiskConfigError(); err != nil {

@@ -1982,12 +1982,27 @@ type MapResponse struct {
 	// plane's perspective. A nil value means no change from the previous
 	// MapResponse. A non-nil 0-length slice restores the health to good (no
 	// known problems). A non-zero length slice are the list of problems that
-	// the control place sees.
+	// the control plane sees.
+	//
+	// Either this will be set, or DisplayMessages will be set, but not both.
 	//
 	// Note that this package's type, due its use of a slice and omitempty, is
 	// unable to marshal a zero-length non-nil slice. The control server needs
 	// to marshal this type using a separate type. See MapResponse docs.
 	Health []string `json:",omitempty"`
+
+	// DisplayMessages, if non-nil, sets the health state of the node from the
+	// control plane's perspective. A nil value means no change from the
+	// previous MapResponse. A non-nil 0-length slice restores the health to
+	// good (no known problems). A non-zero length slice are the list of
+	// problems that the control plane sees.
+	//
+	// Either this will be set, or Health will be set, but not both.
+	//
+	// Note that this package's type, due its use of a slice and omitempty, is
+	// unable to marshal a zero-length non-nil slice. The control server needs
+	// to marshal this type using a separate type. See MapResponse docs.
+	DisplayMessages []DisplayMessage `json:",omitempty"`
 
 	// SSHPolicy, if non-nil, updates the SSH policy for how incoming
 	// SSH connections should be handled.
@@ -2031,6 +2046,37 @@ type MapResponse struct {
 	// default after the node registered.
 	DefaultAutoUpdate opt.Bool `json:",omitempty"`
 }
+
+type DisplayMessageAction struct {
+	URL   string
+	Label string
+}
+
+type DisplayMessage struct {
+	ID                  string
+	Title               string
+	Text                string
+	ImpactsConnectivity bool
+	Severity            DisplayMessageSeverity
+	PrimaryAction       *DisplayMessageAction `json:",omitempty"`
+}
+
+// DisplayMessageSeverity represents how serious a Display Message is. Analogous
+// to health.DisplayMessageSeverity.
+type DisplayMessageSeverity string
+
+const (
+	// SeverityHigh is the highest severity level, used for critical errors that need immediate attention.
+	// On platforms where the client GUI can deliver notifications, a SeverityHigh message will trigger
+	// a modal notification.
+	SeverityHigh DisplayMessageSeverity = "high"
+	// SeverityMedium is used for errors that are important but not critical. This won't trigger a modal
+	// notification, however it will be displayed in a more visible way than a SeverityLow message.
+	SeverityMedium DisplayMessageSeverity = "medium"
+	// SeverityLow is used for less important notices that don't need immediate attention. The user will
+	// have to go to a Settings window, or another "hidden" GUI location to see these messages.
+	SeverityLow DisplayMessageSeverity = "low"
+)
 
 // ClientVersion is information about the latest client version that's available
 // for the client (and whether they're already running it).
