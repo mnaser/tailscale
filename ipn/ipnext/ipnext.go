@@ -14,6 +14,8 @@ import (
 	"tailscale.com/feature"
 	"tailscale.com/ipn"
 	"tailscale.com/ipn/ipnauth"
+	"tailscale.com/ipn/ipnstate"
+	"tailscale.com/tailcfg"
 	"tailscale.com/tsd"
 	"tailscale.com/tstime"
 	"tailscale.com/types/logger"
@@ -347,4 +349,23 @@ type Hooks struct {
 	// NewControlClient are the functions to be called when a new control client
 	// is created. It is called with the LocalBackend locked.
 	NewControlClient feature.Hooks[NewControlClientCallback]
+
+	// HookOnSelfChange is called (with LocalBackend.mu held) when the self node
+	// changes, including changing to nothing (an invalid view).
+	HookOnSelfChange feature.Hooks[func(tailcfg.NodeView)]
+
+	// HookOnNetMapChange is mutates the provisded Notify before sending it to
+	// the IPN bus. It is called with LocalBackend.mu held.
+	HookMutateNotifyLocked feature.Hooks[func(*ipn.Notify)]
+
+	// HookSetPeerStatus is called to mutate PeerStatus.
+	// Callers must only use HookSetPeerStatusEnv to read data.
+	HookSetPeerStatus feature.Hooks[func(*ipnstate.PeerStatus, HookSetPeerStatusEnv)]
+}
+
+type HookSetPeerStatusEnv interface {
+	State() ipn.State
+	Peer() tailcfg.NodeView
+	PeerHasCap(tailcfg.PeerCapability) bool
+	PeerHasPeerAPI() bool
 }

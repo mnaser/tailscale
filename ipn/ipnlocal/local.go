@@ -26,7 +26,6 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"reflect"
 	"runtime"
 	"slices"
@@ -58,6 +57,7 @@ import (
 	"tailscale.com/ipn"
 	"tailscale.com/ipn/conffile"
 	"tailscale.com/ipn/ipnauth"
+	"tailscale.com/ipn/ipnext"
 	"tailscale.com/ipn/ipnstate"
 	"tailscale.com/ipn/policy"
 	"tailscale.com/log/sockstatlog"
@@ -594,6 +594,20 @@ func NewLocalBackend(logf logger.Logf, logID logid.PublicID, sys *tsd.System, lo
 func (b *LocalBackend) Clock() tstime.Clock { return b.clock }
 func (b *LocalBackend) Sys() *tsd.System    { return b.sys }
 
+type NodeState interface {
+	AppendMatchingPeers(base []tailcfg.NodeView, pred func(tailcfg.NodeView) bool) []tailcfg.NodeView
+	PeerCaps(src netip.Addr) tailcfg.PeerCapMap
+
+	// PeerAPIBase returns the "http://ip:port" URL base to reach peer's
+	// PeerAPI, or the empty string if the peer is invalid or doesn't support
+	// PeerAPI.
+	PeerAPIBase(tailcfg.NodeView) string
+}
+
+func (b *LocalBackend) NodeState() NodeState {
+	return b.currentNode()
+}
+
 func (b *LocalBackend) currentNode() *localNodeContext {
 	if v := b.currentNodeAtomic.Load(); v != nil || !testenv.InTest() {
 		return v
@@ -770,17 +784,6 @@ func (b *LocalBackend) GetComponentDebugLogging(component string) time.Time {
 // It is always non-nil.
 func (b *LocalBackend) Dialer() *tsdial.Dialer {
 	return b.dialer
-}
-
-// SetDirectFileRoot sets the directory to download files to directly,
-// without buffering them through an intermediate daemon-owned
-// tailcfg.UserID-specific directory.
-//
-// This must be called before the LocalBackend starts being used.
-func (b *LocalBackend) SetDirectFileRoot(dir string) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.directFileRoot = dir
 }
 
 // ReloadConfig reloads the backend's config from disk.
@@ -1284,8 +1287,16 @@ func (b *LocalBackend) populatePeerStatusLocked(sb *ipnstate.StatusBuilder) {
 	for id, up := range nm.UserProfiles {
 		sb.AddUser(id, up)
 	}
+	var hookEnv ipnext.HookSetPeerStatusEnv
+	var curPeer tailcfg.NodeView
+	if len(b.extHost.hooks.HookSetPeerStatus) > 0 {
+		he := &hookSetPeerStatusEnv{b: b, curPeer: &curPeer, cn: cn}
+		defer he.Close()
+		hookEnv = he
+	}
 	exitNodeID := b.pm.CurrentPrefs().ExitNodeID()
 	for _, p := range cn.Peers() {
+		curPeer = p
 		tailscaleIPs := make([]netip.Addr, 0, p.Addresses().Len())
 		for i := range p.Addresses().Len() {
 			addr := p.Addresses().At(i)
@@ -1309,8 +1320,8 @@ func (b *LocalBackend) populatePeerStatusLocked(sb *ipnstate.StatusBuilder) {
 			Location:        p.Hostinfo().Location().AsStruct(),
 			Capabilities:    p.Capabilities().AsSlice(),
 		}
-		if f := hookSetPeerStatusTaildropTargetLocked; f != nil {
-			f(b, ps, p)
+		for _, f := range b.extHost.hooks.HookSetPeerStatus {
+			f(ps, hookEnv)
 		}
 		if cm := p.CapMap(); cm.Len() > 0 {
 			ps.CapMap = make(tailcfg.NodeCapMap, cm.Len())
@@ -3301,17 +3312,6 @@ func (b *LocalBackend) sendTo(n ipn.Notify, recipient notificationTarget) {
 	b.sendToLocked(n, recipient)
 }
 
-var (
-	// hookSetNotifyFilesWaitingLocked, if non-nil, is called in sendToLocked to
-	// populate ipn.Notify.FilesWaiting when taildrop is linked in to the binary
-	// and enabled on a LocalBackend.
-	hookSetNotifyFilesWaitingLocked func(*LocalBackend, *ipn.Notify)
-
-	// hookSetPeerStatusTaildropTargetLocked, if non-nil, is called to populate PeerStatus
-	// if taildrop is linked in to the binary and enabled on the LocalBackend.
-	hookSetPeerStatusTaildropTargetLocked func(*LocalBackend, *ipnstate.PeerStatus, tailcfg.NodeView)
-)
-
 // sendToLocked is like [LocalBackend.sendTo], but assumes b.mu is already held.
 func (b *LocalBackend) sendToLocked(n ipn.Notify, recipient notificationTarget) {
 	if n.Prefs != nil {
@@ -3321,8 +3321,8 @@ func (b *LocalBackend) sendToLocked(n ipn.Notify, recipient notificationTarget) 
 		n.Version = version.Long()
 	}
 
-	if f := hookSetNotifyFilesWaitingLocked; f != nil {
-		f(b, &n)
+	for _, f := range b.extHost.hooks.HookMutateNotifyLocked {
+		f(&n)
 	}
 
 	for _, sess := range b.notifyWatchers {
@@ -5249,26 +5249,6 @@ func (b *LocalBackend) TailscaleVarRoot() string {
 	return ""
 }
 
-func (b *LocalBackend) fileRootLocked(uid tailcfg.UserID) string {
-	if v := b.directFileRoot; v != "" {
-		return v
-	}
-	varRoot := b.TailscaleVarRoot()
-	if varRoot == "" {
-		b.logf("Taildrop disabled; no state directory")
-		return ""
-	}
-	baseDir := fmt.Sprintf("%s-uid-%d",
-		strings.ReplaceAll(b.activeLogin, "@", "-"),
-		uid)
-	dir := filepath.Join(varRoot, "files", baseDir)
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		b.logf("Taildrop disabled; error making directory: %v", err)
-		return ""
-	}
-	return dir
-}
-
 // closePeerAPIListenersLocked closes any existing PeerAPI listeners
 // and clears out the PeerAPI server state.
 //
@@ -5336,8 +5316,7 @@ func (b *LocalBackend) initPeerAPIListener() {
 	}
 
 	ps := &peerAPIServer{
-		b:        b,
-		taildrop: b.newTaildropManager(b.fileRootLocked(selfNode.User())),
+		b: b,
 	}
 	if dm, ok := b.sys.DNSManager.GetOK(); ok {
 		ps.resolver = dm.Resolver()
@@ -6195,6 +6174,9 @@ func (b *LocalBackend) setNetMapLocked(nm *netmap.NetworkMap) {
 		return
 	}
 
+	for _, f := range b.extHost.hooks.HookOnSelfChange {
+		f(nm.SelfNode)
+	}
 	if nm.SelfNode.Valid() {
 		var approved float64
 		for _, route := range nm.SelfNode.AllowedIPs().All() {
