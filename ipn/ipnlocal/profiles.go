@@ -551,7 +551,9 @@ func (pm *profileManager) writePrefsToStore(key ipn.StateKey, prefs ipn.PrefsVie
 
 // Profiles returns the list of known profiles accessible to the current user.
 func (pm *profileManager) Profiles() []ipn.LoginProfileView {
-	return pm.allProfilesFor(pm.currentUserID)
+	profiles := pm.allProfilesFor(pm.currentUserID)
+	metricProfileCount.Set(int64(len(profiles)))
+	return profiles
 }
 
 // ProfileByID returns a profile with the given id, if it is accessible to the current user.
@@ -741,6 +743,8 @@ func (pm *profileManager) deleteProfileNoPermCheck(profile ipn.LoginProfileView)
 		return err
 	}
 	delete(pm.knownProfiles, profile.ID())
+	metricDeleteProfile.Add(1)
+
 	return pm.writeKnownProfiles()
 }
 
@@ -961,6 +965,7 @@ var (
 	metricSwitchProfile    = clientmetric.NewCounter("profiles_switch")
 	metricDeleteProfile    = clientmetric.NewCounter("profiles_delete")
 	metricDeleteAllProfile = clientmetric.NewCounter("profiles_delete_all")
+	metricProfileCount     = clientmetric.NewGauge("profiles_count")
 
 	metricMigration        = clientmetric.NewCounter("profiles_migration")
 	metricMigrationError   = clientmetric.NewCounter("profiles_migration_error")

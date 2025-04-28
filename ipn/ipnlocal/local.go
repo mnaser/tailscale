@@ -167,6 +167,14 @@ type watchSession struct {
 	cancel    context.CancelFunc // to shut down the session
 }
 
+var (
+	metricExitNodeEnabled        = clientmetric.NewCounter("localbackend_exit_node_enabled")
+	metricMullvadExitNodeEnabled = clientmetric.NewCounter("localbackend_exit_node_mullvad_enabled")
+	// This isn't specifically related to localbacked, so we're eliding the prefix with the expectation
+	// that this metric is likely be recorded elsewhere in the future.
+	metricCaptivePortalDetected = clientmetric.NewCounter("captiveportal_detected")
+)
+
 // LocalBackend is the glue between the major pieces of the Tailscale
 // network software: the cloud control plane (via controlclient), the
 // network data plane (via wgengine), and the user-facing UIs and CLIs
@@ -2761,6 +2769,7 @@ func (b *LocalBackend) performCaptiveDetection() {
 	b.mu.Unlock()
 	found := d.Detect(ctx, netMon, dm, preferredDERP)
 	if found {
+		metricCaptivePortalDetected.Add(1)
 		b.health.SetUnhealthy(captivePortalWarnable, health.Args{})
 	} else {
 		b.health.SetHealthy(captivePortalWarnable)
@@ -4387,6 +4396,19 @@ func (b *LocalBackend) editPrefsLockedOnEntry(mp *ipn.MaskedPrefs, unlock unlock
 		b.egg = true
 		b.goTracker.Go(b.doSetHostinfoFilterServices)
 	}
+
+	if mp.ExitNodeIDSet && mp.ExitNodeID != "" {
+		if nm := b.NetMap(); nm != nil {
+			if peer, ok := nm.PeerWithStableID(mp.ExitNodeID); ok {
+				if peer.IsWireGuardOnly() {
+					metricMullvadExitNodeEnabled.Add(1)
+				} else {
+					metricExitNodeEnabled.Add(1)
+				}
+			}
+		}
+	}
+
 	p0 := b.pm.CurrentPrefs()
 	p1 := b.pm.CurrentPrefs().AsStruct()
 	p1.ApplyEdits(mp)
@@ -4475,6 +4497,7 @@ func (b *LocalBackend) setPrefsLockedOnEntry(newp *ipn.Prefs, unlock unlockOnce)
 	applySysPolicy(newp, b.lastSuggestedExitNode, b.overrideAlwaysOn)
 	// setExitNodeID does likewise. No-op if no exit node resolution is needed.
 	setExitNodeID(newp, netMap)
+
 	// We do this to avoid holding the lock while doing everything else.
 
 	oldHi := b.hostinfo
