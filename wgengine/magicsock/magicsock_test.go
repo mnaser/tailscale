@@ -3155,3 +3155,93 @@ func TestNetworkDownSendErrors(t *testing.T) {
 		t.Errorf("expected NetworkDown to increment packet dropped metric; got %q", resp.Body.String())
 	}
 }
+
+func Test_isDiscoMaybeGeneve(t *testing.T) {
+	discoA := key.NewDisco()
+	discoB := key.NewDisco()
+	shared := discoA.Shared(discoB.Public())
+	m := &disco.BindUDPRelayEndpoint{}
+
+	nakedDisco := make([]byte, 0, 512)
+	nakedDisco = append(nakedDisco, disco.Magic...)
+	nakedDisco = discoA.Public().AppendTo(nakedDisco)
+	box := shared.Seal(m.AppendMarshal(nil))
+	nakedDisco = append(nakedDisco, box...)
+
+	geneveEncapDisco := make([]byte, packet.GeneveFixedHeaderLength+len(nakedDisco))
+	gh := packet.GeneveHeader{
+		Version:  0,
+		Protocol: packet.GeneveProtocolDisco,
+		VNI:      1,
+		Control:  true,
+	}
+	err := gh.Encode(geneveEncapDisco)
+	if err != nil {
+		t.Fatal(err)
+	}
+	copy(geneveEncapDisco[packet.GeneveFixedHeaderLength:], nakedDisco)
+
+	nakedWireGuardInitiation := make([]byte, len(geneveEncapDisco))
+	binary.LittleEndian.PutUint32(nakedWireGuardInitiation, device.MessageInitiationType)
+	nakedWireGuardResponse := make([]byte, len(geneveEncapDisco))
+	binary.LittleEndian.PutUint32(nakedWireGuardResponse, device.MessageResponseType)
+	nakedWireGuardCookieReply := make([]byte, len(geneveEncapDisco))
+	binary.LittleEndian.PutUint32(nakedWireGuardCookieReply, device.MessageCookieReplyType)
+	nakedWireGuardTransport := make([]byte, len(geneveEncapDisco))
+	binary.LittleEndian.PutUint32(nakedWireGuardTransport, device.MessageTransportType)
+
+	tests := []struct {
+		name              string
+		msg               []byte
+		wantIsDiscoMsg    bool
+		wantIsGeneveEncap bool
+	}{
+		{
+			name:              "naked disco",
+			msg:               nakedDisco,
+			wantIsDiscoMsg:    true,
+			wantIsGeneveEncap: false,
+		},
+		{
+			name:              "geneve encap disco",
+			msg:               geneveEncapDisco,
+			wantIsDiscoMsg:    true,
+			wantIsGeneveEncap: true,
+		},
+		{
+			name:              "naked WireGuard Initiation type",
+			msg:               nakedWireGuardInitiation,
+			wantIsDiscoMsg:    false,
+			wantIsGeneveEncap: false,
+		},
+		{
+			name:              "naked WireGuard Response type",
+			msg:               nakedWireGuardResponse,
+			wantIsDiscoMsg:    false,
+			wantIsGeneveEncap: false,
+		},
+		{
+			name:              "naked WireGuard Cookie Reply type",
+			msg:               nakedWireGuardCookieReply,
+			wantIsDiscoMsg:    false,
+			wantIsGeneveEncap: false,
+		},
+		{
+			name:              "naked WireGuard Transport type",
+			msg:               nakedWireGuardTransport,
+			wantIsDiscoMsg:    false,
+			wantIsGeneveEncap: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotIsDiscoMsg, gotIsGeneveEncap := isDiscoMaybeGeneve(tt.msg)
+			if gotIsDiscoMsg != tt.wantIsDiscoMsg {
+				t.Errorf("isDiscoMaybeGeneve() gotIsDiscoMsg = %v, want %v", gotIsDiscoMsg, tt.wantIsDiscoMsg)
+			}
+			if gotIsGeneveEncap != tt.wantIsGeneveEncap {
+				t.Errorf("isDiscoMaybeGeneve() gotIsGeneveEncap = %v, want %v", gotIsGeneveEncap, tt.wantIsGeneveEncap)
+			}
+		})
+	}
+}
