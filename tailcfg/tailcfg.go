@@ -875,6 +875,8 @@ type Hostinfo struct {
 	// explicitly declared by a node.
 	Location *Location `json:",omitempty"`
 
+	TPMAvailable opt.Bool `json:",omitempty"` // set to true if a local TPM device is available
+
 	// NOTE: any new fields containing pointers in this type
 	//       require changes to Hostinfo.Equal.
 }
