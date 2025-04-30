@@ -11,15 +11,6 @@ import (
 	"time"
 )
 
-func wantPanic(t *testing.T, fn func()) {
-	t.Helper()
-	defer func() {
-		recover()
-	}()
-	fn()
-	t.Fatal("failed to panic")
-}
-
 func TestAssertLocked(t *testing.T) {
 	m := new(sync.Mutex)
 	wantPanic(t, func() { AssertLocked(m) })
