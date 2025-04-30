@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"runtime"
+	"slices"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -109,9 +110,10 @@ type Tracker struct {
 	lastMapRequestHeard     time.Time        // time we got a 200 from control for a MapRequest
 	ipnState                string
 	ipnWantRunning          bool
-	ipnWantRunningLastTrue  time.Time // when ipnWantRunning last changed false -> true
-	anyInterfaceUp          opt.Bool  // empty means unknown (assume true)
-	controlHealth           []string
+	ipnWantRunningLastTrue  time.Time                // when ipnWantRunning last changed false -> true
+	anyInterfaceUp          opt.Bool                 // empty means unknown (assume true)
+	lastControlMessages     []tailcfg.DisplayMessage // latest control messages processed, kept for change detection
+	controlMessages         []tailcfg.DisplayMessage // latest control messages received
 	lastLoginErr            error
 	localLogConfigErr       error
 	tlsConnectionErrors     map[string]error // map[ServerName]error
@@ -453,6 +455,14 @@ func (t *Tracker) setHealthyLocked(w *Warnable) {
 	}
 }
 
+// notifyWatchersLocked calls each watcher with nil parameters to signal that
+// control health messages have changed (and should be fetched via CurrentState).
+func (t *Tracker) notifyWatchersLocked() {
+	for _, cb := range t.watchers {
+		cb(nil, nil)
+	}
+}
+
 // AppendWarnableDebugFlags appends to base any health items that are currently in failed
 // state and were created with MapDebugFlag.
 func (t *Tracker) AppendWarnableDebugFlags(base []string) []string {
@@ -476,12 +486,20 @@ func (t *Tracker) AppendWarnableDebugFlags(base []string) []string {
 	return ret
 }
 
-// RegisterWatcher adds a function that will be called whenever the health state of any Warnable changes.
-// If a Warnable becomes unhealthy or its unhealthy state is updated, the callback will be called with its
-// current Representation.
-// If a Warnable becomes healthy, the callback will be called with ws set to nil.
-// The provided callback function will be executed in its own goroutine. The returned function can be used
-// to unregister the callback.
+// RegisterWatcher adds a function that will be called whenever the health state
+// of any Warnable changes or the health messages from the control-plane change.
+//
+// If a Warnable becomes unhealthy or its unhealthy state is updated, the
+// callback will be called with its current Representation.
+//
+// If a Warnable becomes healthy, the callback will be called with r set to nil.
+//
+// If the health messages from the control-plane change, the callback will be
+// called with w and r both nil. Clients can fetch the set of control-plane
+// health messages by calling CurrentState().
+//
+// The provided callback function will be executed in its own goroutine. The
+// returned function can be used to unregister the callback.
 func (t *Tracker) RegisterWatcher(cb func(w *Warnable, r *UnhealthyState)) (unregister func()) {
 	return t.registerSyncWatcher(func(w *Warnable, r *UnhealthyState) {
 		go cb(w, r)
@@ -489,9 +507,9 @@ func (t *Tracker) RegisterWatcher(cb func(w *Warnable, r *UnhealthyState)) (unre
 }
 
 // registerSyncWatcher adds a function that will be called whenever the health
-// state of any Warnable changes. The provided callback function will be
-// executed synchronously. Call RegisterWatcher to register any callbacks that
-// won't return from execution immediately.
+// state changes. The provided callback function will be executed synchronously.
+// Call RegisterWatcher to register any callbacks that won't return from
+// execution immediately.
 func (t *Tracker) registerSyncWatcher(cb func(w *Warnable, r *UnhealthyState)) (unregister func()) {
 	if t.nil() {
 		return func() {}
@@ -647,13 +665,16 @@ func (t *Tracker) updateLegacyErrorWarnableLocked(key Subsystem, err error) {
 	}
 }
 
-func (t *Tracker) SetControlHealth(problems []string) {
+func (t *Tracker) SetControlHealth(problems []tailcfg.DisplayMessage) {
 	if t.nil() {
 		return
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.controlHealth = problems
+
+	slices.SortFunc(problems, tailcfg.DisplayMessage.Compare)
+	t.controlMessages = problems
+
 	t.selfCheckLocked()
 }
 
@@ -1159,14 +1180,10 @@ func (t *Tracker) updateBuiltinWarnablesLocked() {
 		t.setHealthyLocked(derpRegionErrorWarnable)
 	}
 
-	if len(t.controlHealth) > 0 {
-		for _, s := range t.controlHealth {
-			t.setUnhealthyLocked(controlHealthWarnable, Args{
-				ArgError: s,
-			})
-		}
-	} else {
-		t.setHealthyLocked(controlHealthWarnable)
+	// Check if control health messages have changed
+	if !slices.EqualFunc(t.lastControlMessages, t.controlMessages, tailcfg.DisplayMessage.Equal) {
+		t.lastControlMessages = t.controlMessages
+		t.notifyWatchersLocked()
 	}
 
 	if err := envknob.ApplyDiskConfigError(); err != nil {

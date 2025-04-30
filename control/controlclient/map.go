@@ -7,6 +7,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"fmt"
 	"maps"
 	"net"
 	"reflect"
@@ -828,6 +829,17 @@ func (ms *mapSession) sortedPeers() []tailcfg.NodeView {
 func (ms *mapSession) netmap() *netmap.NetworkMap {
 	peerViews := ms.sortedPeers()
 
+	var displayMessages []tailcfg.DisplayMessage
+	for _, h := range ms.lastHealth {
+		m := tailcfg.DisplayMessage{
+			ID:       "control-health",
+			Title:    "Coordination server reports an issue",
+			Severity: tailcfg.SeverityMedium,
+			Text:     fmt.Sprintf("The coordination server is reporting a health issue: %s", h),
+		}
+		displayMessages = append(displayMessages, m)
+	}
+
 	nm := &netmap.NetworkMap{
 		NodeKey:           ms.publicNodeKey,
 		PrivateKey:        ms.privateNodeKey,
@@ -842,7 +854,7 @@ func (ms *mapSession) netmap() *netmap.NetworkMap {
 		SSHPolicy:         ms.lastSSHPolicy,
 		CollectServices:   ms.collectServices,
 		DERPMap:           ms.lastDERPMap,
-		ControlHealth:     ms.lastHealth,
+		DisplayMessages:   displayMessages,
 		TKAEnabled:        ms.lastTKAInfo != nil && !ms.lastTKAInfo.Disabled,
 	}
 
